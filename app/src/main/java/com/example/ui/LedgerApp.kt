@@ -1,7 +1,11 @@
 package com.example.ui
 
+import android.app.Activity
 import android.app.TimePickerDialog
 import androidx.activity.compose.rememberLauncherForActivityResult
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
@@ -32,10 +36,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Flight
@@ -417,6 +426,7 @@ fun LogScreen(viewModel: LedgerViewModel) {
     val selectedCategoryKey by viewModel.selectedLoggingCategory.collectAsState()
     val cores by viewModel.allCores.collectAsState()
     val currency by viewModel.activeCurrency.collectAsState()
+    val loggingTimestamp by viewModel.loggingTimestamp.collectAsState()
 
     val keyboardController = LocalSoftwareKeyboardController.current
 
@@ -515,6 +525,68 @@ fun LogScreen(viewModel: LedgerViewModel) {
                     .fillMaxWidth()
                     .testTag("memo_input")
             )
+        }
+
+        // [TRANSACTION DATE] Input
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = "TRANSACTION DATE:",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+
+            val context = LocalContext.current
+            val sdf = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
+            val formattedDate = remember(loggingTimestamp) { sdf.format(Date(loggingTimestamp)) }
+
+            val calendar = Calendar.getInstance().apply { timeInMillis = loggingTimestamp }
+            val datePickerDialog = android.app.DatePickerDialog(
+                context,
+                { _, year, month, dayOfMonth ->
+                    val newCal = Calendar.getInstance().apply {
+                        set(Calendar.YEAR, year)
+                        set(Calendar.MONTH, month)
+                        set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                    }
+                    viewModel.loggingTimestamp.value = newCal.timeInMillis
+                },
+                calendar.get(Calendar.YEAR),
+                calendar.get(Calendar.MONTH),
+                calendar.get(Calendar.DAY_OF_MONTH)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(2.dp, MaterialTheme.colorScheme.onBackground)
+                    .background(MaterialTheme.colorScheme.background)
+                    .clickable { datePickerDialog.show() }
+                    .padding(12.dp)
+                    .testTag("date_picker_button")
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = formattedDate,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Icon(
+                        imageVector = Icons.Default.DateRange,
+                        contentDescription = "Select Date",
+                        tint = MaterialTheme.colorScheme.onBackground,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
 
         // [SELECT EXPENSE CATEGORY] Horizontal Carousel
@@ -916,6 +988,7 @@ fun LedgerScreen(viewModel: LedgerViewModel) {
         var editAmount by remember(editingTx) { mutableStateOf(editingTx.amount.toString()) }
         var editMemo by remember(editingTx) { mutableStateOf(editingTx.memo) }
         var editCategoryKey by remember(editingTx) { mutableStateOf(editingTx.categoryKey) }
+        var editTimestamp by remember(editingTx) { mutableStateOf(editingTx.timestamp) }
         var showCatDropdown by remember { mutableStateOf(false) }
 
         androidx.compose.ui.window.Dialog(
@@ -1048,6 +1121,65 @@ fun LedgerScreen(viewModel: LedgerViewModel) {
                         )
                     }
 
+                    // Timestamp Input (Date Picker)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "DATE:",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        val context = LocalContext.current
+                        val sdf = remember { SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()) }
+                        val formattedDate = remember(editTimestamp) { sdf.format(Date(editTimestamp)) }
+
+                        val calendar = Calendar.getInstance().apply { timeInMillis = editTimestamp }
+                        val datePickerDialog = android.app.DatePickerDialog(
+                            context,
+                            { _, year, month, dayOfMonth ->
+                                val newCal = Calendar.getInstance().apply {
+                                    set(Calendar.YEAR, year)
+                                    set(Calendar.MONTH, month)
+                                    set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                                }
+                                editTimestamp = newCal.timeInMillis
+                            },
+                            calendar.get(Calendar.YEAR),
+                            calendar.get(Calendar.MONTH),
+                            calendar.get(Calendar.DAY_OF_MONTH)
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.onBackground)
+                                .background(MaterialTheme.colorScheme.background)
+                                .clickable { datePickerDialog.show() }
+                                .padding(8.dp)
+                                .testTag("edit_date_button"),
+                            contentAlignment = Alignment.CenterStart
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = formattedDate,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onBackground
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.DateRange,
+                                    contentDescription = "Select Date",
+                                    tint = MaterialTheme.colorScheme.onBackground,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+
                     DashedDivider()
 
                     // Action buttons
@@ -1090,7 +1222,7 @@ fun LedgerScreen(viewModel: LedgerViewModel) {
                                         amount = finalAmt,
                                         memo = editMemo,
                                         categoryKey = editCategoryKey,
-                                        timestamp = editingTx.timestamp
+                                        timestamp = editTimestamp
                                     )
                                     selectedTxToEdit = null
                                 }
@@ -1118,6 +1250,104 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
     val transactions by viewModel.allTransactions.collectAsState()
     val cores by viewModel.allCores.collectAsState()
     val currency by viewModel.activeCurrency.collectAsState()
+
+    var selectedBarIndex by remember(interval) { mutableStateOf(6) }
+
+    // Calculate dynamic aggregation values and labels based on interval
+    val labels = ArrayList<String>()
+    val totals = FloatArray(7)
+    val ranges = ArrayList<Pair<Long, Long>>()
+
+    when (interval) {
+        "DAILY" -> {
+            for (i in 6 downTo 0) {
+                val dayCal = Calendar.getInstance()
+                dayCal.add(Calendar.DAY_OF_YEAR, -i)
+                val dateStr = SimpleDateFormat("MM/dd", Locale.US).format(dayCal.time)
+                labels.add(dateStr)
+
+                val startOfDay = Calendar.getInstance().apply {
+                    timeInMillis = dayCal.timeInMillis
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+
+                val endOfDay = Calendar.getInstance().apply {
+                    timeInMillis = dayCal.timeInMillis
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }.timeInMillis
+
+                ranges.add(Pair(startOfDay, endOfDay))
+                totals[6 - i] = transactions.filter { it.timestamp in startOfDay..endOfDay }.sumOf { it.amount }.toFloat()
+            }
+        }
+        "WEEKLY" -> {
+            for (i in 6 downTo 0) {
+                val weekCal = Calendar.getInstance().apply {
+                    firstDayOfWeek = Calendar.MONDAY
+                    add(Calendar.WEEK_OF_YEAR, -i)
+                }
+                val weekNum = weekCal.get(Calendar.WEEK_OF_YEAR)
+                labels.add("W$weekNum")
+
+                val startOfWeek = Calendar.getInstance().apply {
+                    firstDayOfWeek = Calendar.MONDAY
+                    timeInMillis = weekCal.timeInMillis
+                    set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+
+                val endOfWeek = Calendar.getInstance().apply {
+                    timeInMillis = startOfWeek
+                    add(Calendar.DAY_OF_YEAR, 6)
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }.timeInMillis
+
+                ranges.add(Pair(startOfWeek, endOfWeek))
+                totals[6 - i] = transactions.filter { it.timestamp in startOfWeek..endOfWeek }.sumOf { it.amount }.toFloat()
+            }
+        }
+        "MONTHLY" -> {
+            for (i in 6 downTo 0) {
+                val monthCal = Calendar.getInstance()
+                monthCal.add(Calendar.MONTH, -i)
+                val monthName = SimpleDateFormat("MMM", Locale.US).format(monthCal.time)
+                labels.add(monthName)
+
+                val startOfMonth = Calendar.getInstance().apply {
+                    timeInMillis = monthCal.timeInMillis
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }.timeInMillis
+
+                val endOfMonth = Calendar.getInstance().apply {
+                    timeInMillis = monthCal.timeInMillis
+                    set(Calendar.DAY_OF_MONTH, monthCal.getActualMaximum(Calendar.DAY_OF_MONTH))
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }.timeInMillis
+
+                ranges.add(Pair(startOfMonth, endOfMonth))
+                totals[6 - i] = transactions.filter { it.timestamp in startOfMonth..endOfMonth }.sumOf { it.amount }.toFloat()
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1175,95 +1405,6 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                 )
                 DashedDivider()
 
-                // Calculate dynamic aggregation values and labels based on interval
-                val labels = ArrayList<String>()
-                val totals = FloatArray(7)
-
-                when (interval) {
-                    "DAILY" -> {
-                        for (i in 6 downTo 0) {
-                            val dayCal = Calendar.getInstance()
-                            dayCal.add(Calendar.DAY_OF_YEAR, -i)
-                            val dateStr = SimpleDateFormat("MM/dd", Locale.US).format(dayCal.time)
-                            labels.add(dateStr)
-
-                            val startOfDay = Calendar.getInstance().apply {
-                                timeInMillis = dayCal.timeInMillis
-                                set(Calendar.HOUR_OF_DAY, 0)
-                                set(Calendar.MINUTE, 0)
-                                set(Calendar.SECOND, 0)
-                                set(Calendar.MILLISECOND, 0)
-                            }.timeInMillis
-
-                            val endOfDay = Calendar.getInstance().apply {
-                                timeInMillis = dayCal.timeInMillis
-                                set(Calendar.HOUR_OF_DAY, 23)
-                                set(Calendar.MINUTE, 59)
-                                set(Calendar.SECOND, 59)
-                                set(Calendar.MILLISECOND, 999)
-                            }.timeInMillis
-
-                            totals[6 - i] = transactions.filter { it.timestamp in startOfDay..endOfDay }.sumOf { it.amount }.toFloat()
-                        }
-                    }
-                    "WEEKLY" -> {
-                        for (i in 6 downTo 0) {
-                            val weekCal = Calendar.getInstance()
-                            weekCal.add(Calendar.WEEK_OF_YEAR, -i)
-                            val weekNum = weekCal.get(Calendar.WEEK_OF_YEAR)
-                            labels.add("W$weekNum")
-
-                            val startOfWeek = Calendar.getInstance().apply {
-                                timeInMillis = weekCal.timeInMillis
-                                set(Calendar.DAY_OF_WEEK, Calendar.MONDAY)
-                                set(Calendar.HOUR_OF_DAY, 0)
-                                set(Calendar.MINUTE, 0)
-                                set(Calendar.SECOND, 0)
-                                set(Calendar.MILLISECOND, 0)
-                            }.timeInMillis
-
-                            val endOfWeek = Calendar.getInstance().apply {
-                                timeInMillis = weekCal.timeInMillis
-                                set(Calendar.DAY_OF_WEEK, Calendar.SUNDAY)
-                                set(Calendar.HOUR_OF_DAY, 23)
-                                set(Calendar.MINUTE, 59)
-                                set(Calendar.SECOND, 59)
-                                set(Calendar.MILLISECOND, 999)
-                            }.timeInMillis
-
-                            totals[6 - i] = transactions.filter { it.timestamp in startOfWeek..endOfWeek }.sumOf { it.amount }.toFloat()
-                        }
-                    }
-                    "MONTHLY" -> {
-                        for (i in 6 downTo 0) {
-                            val monthCal = Calendar.getInstance()
-                            monthCal.add(Calendar.MONTH, -i)
-                            val monthName = SimpleDateFormat("MMM", Locale.US).format(monthCal.time)
-                            labels.add(monthName)
-
-                            val startOfMonth = Calendar.getInstance().apply {
-                                timeInMillis = monthCal.timeInMillis
-                                set(Calendar.DAY_OF_MONTH, 1)
-                                set(Calendar.HOUR_OF_DAY, 0)
-                                set(Calendar.MINUTE, 0)
-                                set(Calendar.SECOND, 0)
-                                set(Calendar.MILLISECOND, 0)
-                            }.timeInMillis
-
-                            val endOfMonth = Calendar.getInstance().apply {
-                                timeInMillis = monthCal.timeInMillis
-                                set(Calendar.DAY_OF_MONTH, monthCal.getActualMaximum(Calendar.DAY_OF_MONTH))
-                                set(Calendar.HOUR_OF_DAY, 23)
-                                set(Calendar.MINUTE, 59)
-                                set(Calendar.SECOND, 59)
-                                set(Calendar.MILLISECOND, 999)
-                            }.timeInMillis
-
-                            totals[6 - i] = transactions.filter { it.timestamp in startOfMonth..endOfMonth }.sumOf { it.amount }.toFloat()
-                        }
-                    }
-                }
-
                 val maxAmount = totals.maxOrNull() ?: 0f
                 val finalMax = if (maxAmount == 0f) 100f else maxAmount
 
@@ -1272,10 +1413,26 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                 val barColor = MaterialTheme.colorScheme.onBackground
                 val textOnColor = MaterialTheme.colorScheme.onBackground
 
+                var boxWidth by remember { mutableStateOf(1f) }
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(160.dp)
+                        .onSizeChanged { boxWidth = it.width.toFloat() }
+                        .pointerInput(interval) {
+                            detectTapGestures { offset ->
+                                val x = offset.x
+                                val paddingLeft = 40f
+                                val plotWidth = boxWidth - paddingLeft
+                                if (x >= paddingLeft && plotWidth > 0) {
+                                    val barSpacing = plotWidth / 7
+                                    val relativeX = x - paddingLeft
+                                    val clickedIndex = (relativeX / barSpacing).toInt().coerceIn(0, 6)
+                                    selectedBarIndex = clickedIndex
+                                }
+                            }
+                        }
                 ) {
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val canvasWidth = size.width
@@ -1324,6 +1481,19 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                             val rightX = paddingLeft + (i * barSpacing) + (barSpacing * 0.8f)
                             val topY = plotHeight - barHeight
 
+                            // Draw a selection highlight frame around the column of the selected bar
+                            if (selectedBarIndex == i) {
+                                drawRect(
+                                    color = barColor,
+                                    topLeft = Offset(paddingLeft + i * barSpacing + 2f, 0f),
+                                    size = androidx.compose.ui.geometry.Size(barSpacing - 4f, plotHeight),
+                                    style = Stroke(
+                                        width = 2f,
+                                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f), 0f)
+                                    )
+                                )
+                            }
+
                             // Draw hard solid retro bar if amount > 0
                             if (barVal > 0) {
                                 drawRect(
@@ -1343,12 +1513,17 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                             .padding(start = 24.dp), // offset by y-axis padding
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        labels.forEach { label ->
+                        labels.forEachIndexed { idx, label ->
+                            val isSelected = selectedBarIndex == idx
                             Text(
-                                text = label,
+                                text = if (isSelected) "[$label]" else label,
                                 style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                 color = MaterialTheme.colorScheme.onBackground,
-                                modifier = Modifier.width(32.dp),
+                                modifier = Modifier
+                                    .width(32.dp)
+                                    .clickable { selectedBarIndex = idx }
+                                    .testTag("label_bar_$idx"),
                                 textAlign = TextAlign.Center
                             )
                         }
@@ -1376,15 +1551,23 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val selectedLabel = labels.getOrNull(selectedBarIndex) ?: ""
                 Text(
-                    text = "CATEGORY APPORTIONMENT METER",
+                    text = if (selectedLabel.isNotEmpty()) "CATEGORY APPORTIONMENT METER ($selectedLabel)" else "CATEGORY APPORTIONMENT METER",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 DashedDivider()
 
-                if (transactions.isEmpty()) {
+                val selectedRange = ranges.getOrNull(selectedBarIndex)
+                val filteredTransactions = if (selectedRange != null) {
+                    transactions.filter { it.timestamp in selectedRange.first..selectedRange.second }
+                } else {
+                    transactions
+                }
+
+                if (filteredTransactions.isEmpty()) {
                     Text(
                         text = "[NO STATS REGISTERED YET]",
                         style = MaterialTheme.typography.bodySmall,
@@ -1397,7 +1580,7 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                 } else {
                     // Aggregate category amounts
                     val categorySums = mutableMapOf<String, Double>()
-                    transactions.forEach { tx ->
+                    filteredTransactions.forEach { tx ->
                         categorySums[tx.categoryKey] = (categorySums[tx.categoryKey] ?: 0.0) + tx.amount
                     }
                     val grandTotal = categorySums.values.sum()
@@ -1405,7 +1588,7 @@ fun AnalyseScreen(viewModel: LedgerViewModel) {
                     categorySums.forEach { (catKey, sum) ->
                         val core = cores.find { it.systemKey == catKey }
                         val name = core?.name ?: catKey.uppercase()
-                        val percentage = (sum / grandTotal * 100).toInt()
+                        val percentage = if (grandTotal > 0) (sum / grandTotal * 100).toInt() else 0
 
                         // ASCII meter string representation e.g. [████░░░░░░]
                         val filledBlocks = percentage / 10
@@ -1479,6 +1662,7 @@ fun ConfigScreen(viewModel: LedgerViewModel) {
     val googleEmail by viewModel.googleUserEmail.collectAsState()
     val cloudSyncStatus by viewModel.cloudSyncStatus.collectAsState()
     val customCurrencySymbol by viewModel.customCurrencySymbol.collectAsState()
+    val syncConsoleLogs by viewModel.syncConsoleLogs.collectAsState()
 
     // Add Core states
     val newName by viewModel.newCoreName.collectAsState()
@@ -1498,6 +1682,42 @@ fun ConfigScreen(viewModel: LedgerViewModel) {
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { viewModel.readBackupFromUri(context, it) }
+    }
+
+    val googleSignInLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+            try {
+                val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)
+                if (account != null) {
+                    viewModel.handleGoogleSignInResult(account)
+                } else {
+                    viewModel.logConsole("SIGN-IN ERROR: Account is null")
+                }
+            } catch (e: Exception) {
+                viewModel.logConsole("SIGN-IN FAILED: ${e.localizedMessage}")
+            }
+        } else {
+            viewModel.logConsole("SIGN-IN CANCELLED")
+        }
+    }
+
+    val consentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            viewModel.retryGoogleDriveAction()
+        } else {
+            viewModel.logConsole("CONSENT DENIED")
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.recoverableAuthIntent.collect { intent ->
+            consentLauncher.launch(intent)
+        }
     }
 
     // Time Picker
@@ -1734,7 +1954,7 @@ fun ConfigScreen(viewModel: LedgerViewModel) {
         // [CLOUD SYNCHRONIZATION CONTROLLER]
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
                 text = "CLOUD SYNCHRONIZATION CONTROLLER:",
@@ -1744,75 +1964,179 @@ fun ConfigScreen(viewModel: LedgerViewModel) {
             )
 
             if (!isGoogleSignedIn) {
-                Text(
-                    text = "Sync your ledger via Google Drive. Note: You must register this app's SHA-1 and Package Name in the Google Cloud Console to enable this feature.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
-
-                RetroButton(
-                    onClick = { viewModel.signInWithGoogle(context) },
-                    text = "[AUTHORIZE GOOGLE DRIVE]",
-                    modifier = Modifier.fillMaxWidth().testTag("connect_google_button")
-                )
-            } else {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .border(1.dp, MaterialTheme.colorScheme.onBackground)
-                        .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.05f))
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column {
-                        Text(
-                            text = "CONNECTED AS:",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                        )
-                        Text(
-                            text = googleEmail.uppercase(),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Text(
-                            text = "STATUS: $cloudSyncStatus",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (cloudSyncStatus == "SUCCESS") Color(0xFF008800) else MaterialTheme.colorScheme.onBackground
-                        )
-                    }
+                    Text(
+                        text = "STATUS: OFFLINE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = RetroRed
+                    )
+                    Text(
+                        text = "Establish a secure sandbox connection inside your private Google Drive AppData folder to backup and restore system states.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
+                    )
 
-                    Box(
-                        modifier = Modifier
-                            .border(1.dp, RetroRed)
-                            .clickable { viewModel.signOutGoogle(context) }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "DISCONNECT",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = RetroRed,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    RetroButton(
+                        onClick = {
+                            val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                                .requestEmail()
+                                .requestScopes(
+                                    Scope("https://www.googleapis.com/auth/drive.appdata"),
+                                    Scope("https://www.googleapis.com/auth/drive.file")
+                                )
+                                .build()
+                            val client = GoogleSignIn.getClient(context, gso)
+                            googleSignInLauncher.launch(client.signInIntent)
+                        },
+                        text = "[AUTHORIZE GOOGLE DRIVE]",
+                        modifier = Modifier.fillMaxWidth().testTag("connect_google_button")
+                    )
                 }
-
-                Row(
+            } else {
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    RetroButton(
-                        onClick = { viewModel.syncToGoogleDrive() },
-                        text = "SYNC TO DRIVE",
-                        modifier = Modifier.weight(1f)
-                    )
-                    RetroButton(
-                        onClick = { viewModel.syncFromGoogleDrive() },
-                        text = "RESTORE FROM DRIVE",
-                        modifier = Modifier.weight(1f)
-                    )
+                    // Google Connection State Card
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.onBackground)
+                            .background(MaterialTheme.colorScheme.onBackground.copy(alpha = 0.05f))
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "CONNECTED AS:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                            )
+                            Text(
+                                text = googleEmail.uppercase(),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "CLOUD SYNC STATUS: $cloudSyncStatus",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = when (cloudSyncStatus) {
+                                    "SUCCESS" -> Color(0xFF00AA00)
+                                    "SYNCING" -> Color(0xFFDDAA00)
+                                    "FAILED" -> RetroRed
+                                    else -> MaterialTheme.colorScheme.onBackground
+                                }
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .border(1.dp, RetroRed)
+                                .clickable { viewModel.signOutGoogle(context) }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = "DISCONNECT",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = RetroRed,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    // Real-time Console Log Panel
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "REAL-TIME LOG CONSOLE:",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Text(
+                                text = "CLEAR LOGS",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = RetroRed,
+                                modifier = Modifier.clickable { viewModel.clearConsoleLogs() }
+                            )
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(100.dp)
+                                .background(Color.Black)
+                                .border(1.dp, MaterialTheme.colorScheme.onBackground)
+                                .padding(8.dp)
+                        ) {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                if (syncConsoleLogs.isEmpty()) {
+                                    item {
+                                        Text(
+                                            text = "> idle - ready for cloud actions...",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                color = Color(0xFF00FF00)
+                                            )
+                                        )
+                                    }
+                                } else {
+                                    items(syncConsoleLogs) { logLine ->
+                                        Text(
+                                            text = "> $logLine",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                                color = Color(0xFF00FF00)
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Action Buttons (Modern spaced out buttons)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RetroButton(
+                            onClick = { viewModel.syncToGoogleDrive(context) },
+                            text = "SYNC TO DRIVE",
+                            enabled = cloudSyncStatus != "SYNCING",
+                            modifier = Modifier.weight(1f)
+                        )
+                        RetroButton(
+                            onClick = { viewModel.syncFromGoogleDrive(context) },
+                            text = "RESTORE FROM DRIVE",
+                            enabled = cloudSyncStatus != "SYNCING",
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 }
             }
         }

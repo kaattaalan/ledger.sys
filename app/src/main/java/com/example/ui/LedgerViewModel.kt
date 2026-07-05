@@ -11,23 +11,30 @@ import com.example.data.LedgerDatabase
 import com.example.data.LedgerRepository
 import com.example.data.Transaction
 import android.util.Log
-import androidx.credentials.ClearCredentialStateRequest
-import androidx.credentials.CredentialManager
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialException
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
-import com.google.api.client.json.gson.GsonFactory
-import com.google.api.services.drive.Drive
-import com.google.api.services.drive.DriveScopes
-import com.google.api.services.drive.model.File
+import android.content.Intent
+import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -55,17 +62,84 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
     val reminderTime = MutableStateFlow(sharedPrefs.getString("reminder_time", "20:00") ?: "20:00")
 
     // Google Cloud Sync settings
-    val isGoogleSignedIn = MutableStateFlow(sharedPrefs.getBoolean("google_signed_in", false))
-    val googleUserEmail = MutableStateFlow(sharedPrefs.getString("google_user_email", "") ?: "")
-    val googleUserName = MutableStateFlow(sharedPrefs.getString("google_user_name", "") ?: "")
-    val googleUserAvatar = MutableStateFlow(sharedPrefs.getString("google_user_avatar", "") ?: "")
+    val isGoogleSignedIn = MutableStateFlow(false)
+    val googleUserEmail = MutableStateFlow("")
+    val googleUserName = MutableStateFlow("")
+    val googleUserAvatar = MutableStateFlow("")
     val cloudSyncStatus = MutableStateFlow("IDLE")
 
-    // Internal Google Auth Token
-    private var googleIdToken: String? = sharedPrefs.getString("google_id_token", null)
+    val syncConsoleLogs = MutableStateFlow<List<String>>(emptyList())
+    val currentSyncPayload = MutableStateFlow("")
+
+    private val _recoverableAuthIntent = MutableSharedFlow<Intent>(extraBufferCapacity = 1)
+    val recoverableAuthIntent: SharedFlow<Intent> = _recoverableAuthIntent.asSharedFlow()
+
+    var pendingActionAfterConsent: String? = null
 
     // Navigation state
     val currentScreen = MutableStateFlow(Screen.LOG)
+
+    init {
+        val lastAccount = GoogleSignIn.getLastSignedInAccount(application)
+        if (lastAccount != null) {
+            val email = lastAccount.email ?: ""
+            val name = lastAccount.displayName ?: "REGISTERED USER"
+            val avatar = lastAccount.photoUrl?.toString() ?: ""
+            isGoogleSignedIn.value = true
+            googleUserEmail.value = email
+            googleUserName.value = name
+            googleUserAvatar.value = avatar
+            
+            sharedPrefs.edit()
+                .putBoolean("google_signed_in", true)
+                .putString("google_user_email", email)
+                .putString("google_user_name", name)
+                .putString("google_user_avatar", avatar)
+                .apply()
+        }
+
+        // Keep currentSyncPayload automatically up-to-date with any DB change reactively!
+        viewModelScope.launch {
+            combine(repository.allCores, repository.allTransactions) { cores, transactions ->
+                cores to transactions
+            }.collect { (cores, transactions) ->
+                try {
+                    val coresJson = JSONArray()
+                    cores.forEach {
+                        val obj = JSONObject().apply {
+                            put("systemKey", it.systemKey)
+                            put("name", it.name)
+                            put("iconName", it.iconName)
+                            put("isSystemProtected", it.isSystemProtected)
+                        }
+                        coresJson.put(obj)
+                    }
+
+                    val txJson = JSONArray()
+                    transactions.forEach {
+                        val obj = JSONObject().apply {
+                            put("amount", it.amount)
+                            put("currency", it.currency)
+                            put("memo", it.memo)
+                            put("categoryKey", it.categoryKey)
+                            put("timestamp", it.timestamp)
+                        }
+                        txJson.put(obj)
+                    }
+
+                    val backup = JSONObject().apply {
+                        put("cores", coresJson)
+                        put("transactions", txJson)
+                        put("system", "LEDGER.SYS")
+                        put("version", 1)
+                    }
+                    currentSyncPayload.value = backup.toString(2)
+                } catch (e: Exception) {
+                    currentSyncPayload.value = "{ \"error\": \"Failed to build: ${e.message}\" }"
+                }
+            }
+        }
+    }
 
     // Data streams
     val allCores: StateFlow<List<CategoryCore>> = repository.allCores.stateIn(
@@ -84,6 +158,7 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
     val loggingMemo = MutableStateFlow("")
     val loggingAmountBuffer = MutableStateFlow("0") // Keypad entry buffer
     val selectedLoggingCategory = MutableStateFlow("food") // matches category core systemKey
+    val loggingTimestamp = MutableStateFlow(System.currentTimeMillis())
 
     // Ledger view filters
     val ledgerSearchQuery = MutableStateFlow("")
@@ -188,6 +263,7 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         }
         val memoText = loggingMemo.value.trim()
         val catKey = selectedLoggingCategory.value
+        val tStamp = loggingTimestamp.value
 
         viewModelScope.launch {
             repository.insertTransaction(
@@ -196,12 +272,13 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                     currency = activeCurrency.value,
                     memo = if (memoText.isEmpty()) "UNNAMED TRANSACTION" else memoText,
                     categoryKey = catKey,
-                    timestamp = System.currentTimeMillis()
+                    timestamp = tStamp
                 )
             )
             // Reset entry form
             loggingAmountBuffer.value = "0"
             loggingMemo.value = ""
+            loggingTimestamp.value = System.currentTimeMillis() // default back to current date
             showStatus("SUCCESS: TRANSACTION COMMITTED TO MEMORY")
         }
     }
@@ -243,38 +320,10 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
     fun writeBackupToUri(context: Context, uri: android.net.Uri) {
         viewModelScope.launch {
             try {
-                val coresJson = JSONArray()
-                allCores.value.forEach {
-                    val obj = JSONObject().apply {
-                        put("systemKey", it.systemKey)
-                        put("name", it.name)
-                        put("iconName", it.iconName)
-                        put("isSystemProtected", it.isSystemProtected)
-                    }
-                    coresJson.put(obj)
-                }
-
-                val txJson = JSONArray()
-                allTransactions.value.forEach {
-                    val obj = JSONObject().apply {
-                        put("amount", it.amount)
-                        put("currency", it.currency)
-                        put("memo", it.memo)
-                        put("categoryKey", it.categoryKey)
-                        put("timestamp", it.timestamp)
-                    }
-                    txJson.put(obj)
-                }
-
-                val backup = JSONObject().apply {
-                    put("cores", coresJson)
-                    put("transactions", txJson)
-                    put("system", "LEDGER.SYS")
-                    put("version", 1)
-                }
+                val payload = buildSyncPayload()
 
                 context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                    outputStream.write(backup.toString().toByteArray())
+                    outputStream.write(payload.toByteArray())
                 }
                 showStatus("BACKUP EXPORTED: FILE WRITTEN SUCCESSFULLY")
             } catch (e: Exception) {
@@ -493,213 +542,336 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    // Helper to get Google Drive Service
-    private fun getDriveService(token: String): Drive {
-        val httpTransport = GoogleNetHttpTransport.newTrustedTransport()
-        val jsonFactory = GsonFactory.getDefaultInstance()
-        return Drive.Builder(httpTransport, jsonFactory, null)
-            .setApplicationName("Ledger App")
-            .setHttpRequestInitializer { request ->
-                request.headers.authorization = "Bearer $token"
-            }
-            .build()
+    // Console logger helper
+    fun logConsole(message: String) {
+        val currentLogs = syncConsoleLogs.value.toMutableList()
+        val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        currentLogs.add("[$timestamp] $message")
+        syncConsoleLogs.value = currentLogs
+        showStatus(message)
+    }
+
+    fun clearConsoleLogs() {
+        syncConsoleLogs.value = emptyList()
     }
 
     // Google Sign-In & Sign-Out handlers
-    fun signInWithGoogle(context: Context) {
-        viewModelScope.launch {
-            val credentialManager = CredentialManager.create(context)
-            
-            // NOTE: In a real app, this Web Client ID must be fetched from Google Cloud Console.
-            // Replace this placeholder with your actual Web Client ID.
-            val clientId = "673008559053-94o3dngqk5qd111o0s7gf87uiea28ot5.apps.googleusercontent.com" 
-
-            val googleIdOption = GetGoogleIdOption.Builder()
-                .setFilterByAuthorizedAccounts(false)
-                .setServerClientId(clientId)
-                .setAutoSelectEnabled(true)
-                .build()
-
-            val request = GetCredentialRequest.Builder()
-                .addCredentialOption(googleIdOption)
-                .build()
-
-            try {
-                val result = credentialManager.getCredential(context, request)
-                val credential = result.credential
-                
-                if (credential is GoogleIdTokenCredential) {
-                    val googleIdTokenCredential = credential
-                    val email = googleIdTokenCredential.id
-                    val name = googleIdTokenCredential.displayName ?: "REGISTERED USER"
-                    val avatar = googleIdTokenCredential.profilePictureUri?.toString() ?: ""
-                    val token = googleIdTokenCredential.idToken
-                    
-                    googleIdToken = token
-                    isGoogleSignedIn.value = true
-                    googleUserEmail.value = email
-                    googleUserName.value = name
-                    googleUserAvatar.value = avatar
-                    
-                    sharedPrefs.edit()
-                        .putBoolean("google_signed_in", true)
-                        .putString("google_user_email", email)
-                        .putString("google_user_name", name)
-                        .putString("google_user_avatar", avatar)
-                        .putString("google_id_token", token)
-                        .apply()
-                    
-                    showStatus("CONNECTED: WELCOME ${name.uppercase()}")
-                } else {
-                    showStatus("ERR: UNEXPECTED CREDENTIAL TYPE")
-                }
-            } catch (e: GetCredentialException) {
-                Log.e("LedgerViewModel", "Sign-in failed", e)
-                val msg = if (e.message?.contains("No credentials") == true) {
-                    "SIGN-IN ERR: NO ACCOUNTS OR INVALID CLIENT ID. CHECK GOOGLE CLOUD CONSOLE."
-                } else {
-                    "SIGN-IN FAILED: ${e.message}"
-                }
-                showStatus(msg)
-            } catch (e: Exception) {
-                Log.e("LedgerViewModel", "Unknown error", e)
-                showStatus("ERR: ${e.localizedMessage}")
-            }
-        }
+    fun handleGoogleSignInResult(account: GoogleSignInAccount) {
+        val email = account.email ?: ""
+        val name = account.displayName ?: "REGISTERED USER"
+        val avatar = account.photoUrl?.toString() ?: ""
+        
+        isGoogleSignedIn.value = true
+        googleUserEmail.value = email
+        googleUserName.value = name
+        googleUserAvatar.value = avatar
+        
+        sharedPrefs.edit()
+            .putBoolean("google_signed_in", true)
+            .putString("google_user_email", email)
+            .putString("google_user_name", name)
+            .putString("google_user_avatar", avatar)
+            .apply()
+        
+        logConsole("CONNECTED: WELCOME ${name.uppercase()}")
+        prepareCurrentPayload()
     }
 
     fun signOutGoogle(context: Context) {
-        viewModelScope.launch {
-            val credentialManager = CredentialManager.create(context)
-            credentialManager.clearCredentialState(ClearCredentialStateRequest())
-            
+        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).build()
+        val client = GoogleSignIn.getClient(context, gso)
+        client.signOut().addOnCompleteListener {
             isGoogleSignedIn.value = false
             googleUserEmail.value = ""
             googleUserName.value = ""
             googleUserAvatar.value = ""
-            googleIdToken = null
             cloudSyncStatus.value = "IDLE"
+            currentSyncPayload.value = ""
+            syncConsoleLogs.value = emptyList()
             
             sharedPrefs.edit()
                 .putBoolean("google_signed_in", false)
                 .putString("google_user_email", "")
                 .putString("google_user_name", "")
                 .putString("google_user_avatar", "")
-                .remove("google_id_token")
                 .apply()
             
-            showStatus("DISCONNECTED FROM GOOGLE CORE")
+            logConsole("DISCONNECTED FROM GOOGLE CORE")
+        }
+    }
+
+    suspend fun buildSyncPayload(): String = withContext(Dispatchers.IO) {
+        val cores = repository.allCores.first()
+        val transactions = repository.allTransactions.first()
+
+        val coresJson = JSONArray()
+        cores.forEach {
+            val obj = JSONObject().apply {
+                put("systemKey", it.systemKey)
+                put("name", it.name)
+                put("iconName", it.iconName)
+                put("isSystemProtected", it.isSystemProtected)
+            }
+            coresJson.put(obj)
+        }
+
+        val txJson = JSONArray()
+        transactions.forEach {
+            val obj = JSONObject().apply {
+                put("amount", it.amount)
+                put("currency", it.currency)
+                put("memo", it.memo)
+                put("categoryKey", it.categoryKey)
+                put("timestamp", it.timestamp)
+            }
+            txJson.put(obj)
+        }
+
+        val backup = JSONObject().apply {
+            put("cores", coresJson)
+            put("transactions", txJson)
+            put("system", "LEDGER.SYS")
+            put("version", 1)
+        }
+        return@withContext backup.toString(2)
+    }
+
+    fun prepareCurrentPayload() {
+        viewModelScope.launch {
+            try {
+                currentSyncPayload.value = buildSyncPayload()
+            } catch (e: Exception) {
+                currentSyncPayload.value = "{ \"error\": \"Failed to build: ${e.message}\" }"
+            }
+        }
+    }
+
+    // Access Token Acquisition
+    private suspend fun fetchAccessToken(context: Context, email: String): String? {
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val scope = "oauth2:https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file"
+                GoogleAuthUtil.getToken(context, email, scope)
+            } catch (recoverable: UserRecoverableAuthException) {
+                Log.w("LedgerViewModel", "UserRecoverableAuthException thrown", recoverable)
+                val intent = recoverable.intent
+                if (intent != null) {
+                    _recoverableAuthIntent.emit(intent)
+                } else {
+                    logConsole("AUTH ERROR: Recoverable intent is null")
+                }
+                null
+            } catch (e: Exception) {
+                Log.e("LedgerViewModel", "Error acquiring access token", e)
+                logConsole("AUTH ERROR: ${e.localizedMessage}")
+                null
+            }
+        }
+    }
+
+    // Google Drive Sync - HTTP REST Helper
+    private suspend fun searchBackupFile(accessToken: String): String? = withContext(Dispatchers.IO) {
+        val client = OkHttpClient()
+        val url = okhttp3.HttpUrl.Builder()
+            .scheme("https")
+            .host("www.googleapis.com")
+            .addPathSegments("drive/v3/files")
+            .addQueryParameter("spaces", "appDataFolder")
+            .addQueryParameter("q", "name = 'ledger_backup.json'")
+            .addQueryParameter("fields", "files(id,name)")
+            .build()
+
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $accessToken")
+            .get()
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                Log.e("LedgerViewModel", "Search failed with code ${response.code}: $errorBody")
+                val cleanMsg = errorBody.ifEmpty { response.message ?: "Unknown" }
+                throw Exception("Drive search error (${response.code}): $cleanMsg")
+            }
+            val bodyStr = response.body?.string() ?: return@withContext null
+            val json = JSONObject(bodyStr)
+            val files = json.optJSONArray("files")
+            if (files != null && files.length() > 0) {
+                return@withContext files.getJSONObject(0).getString("id")
+            }
+        }
+        return@withContext null
+    }
+
+    private suspend fun uploadBackupFile(accessToken: String, fileId: String?, serializedData: String) = withContext(Dispatchers.IO) {
+        val client = OkHttpClient()
+        val boundary = "ledger_backup_boundary"
+        val isNew = fileId == null
+        
+        val metadata = if (isNew) {
+            JSONObject().apply {
+                put("name", "ledger_backup.json")
+                put("parents", JSONArray().put("appDataFolder"))
+            }.toString()
+        } else {
+            JSONObject().apply {
+                put("name", "ledger_backup.json")
+            }.toString()
+        }
+
+        val bodyBuilder = StringBuilder()
+        bodyBuilder.append("--").append(boundary).append("\r\n")
+        bodyBuilder.append("Content-Type: application/json; charset=UTF-8\r\n\r\n")
+        bodyBuilder.append(metadata).append("\r\n")
+        bodyBuilder.append("--").append(boundary).append("\r\n")
+        bodyBuilder.append("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
+        bodyBuilder.append(serializedData).append("\r\n")
+        bodyBuilder.append("--").append(boundary).append("--\r\n")
+
+        val url = if (isNew) {
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        } else {
+            "https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=multipart"
+        }
+
+        val mediaType = "multipart/related; boundary=$boundary".toMediaTypeOrNull()
+        val requestBody = bodyBuilder.toString().toByteArray(Charsets.UTF_8).toRequestBody(mediaType)
+
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer $accessToken")
+            .header("Content-Type", "multipart/related; boundary=$boundary")
+            .method(if (isNew) "POST" else "PATCH", requestBody)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                Log.e("LedgerViewModel", "Upload failed with code ${response.code}: $errorBody")
+                val cleanMsg = errorBody.ifEmpty { response.message ?: "Unknown" }
+                throw Exception("Drive upload error (${response.code}): $cleanMsg")
+            }
+        }
+    }
+
+    private suspend fun downloadBackupFile(accessToken: String, fileId: String): String = withContext(Dispatchers.IO) {
+        val client = OkHttpClient()
+        val request = Request.Builder()
+            .url("https://www.googleapis.com/drive/v3/files/$fileId?alt=media")
+            .header("Authorization", "Bearer $accessToken")
+            .get()
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: ""
+                Log.e("LedgerViewModel", "Download failed with code ${response.code}: $errorBody")
+                val cleanMsg = errorBody.ifEmpty { response.message ?: "Unknown" }
+                throw Exception("Drive download error (${response.code}): $cleanMsg")
+            }
+            return@withContext response.body?.string() ?: throw Exception("Empty response body")
+        }
+    }
+
+    fun retryGoogleDriveAction() {
+        val action = pendingActionAfterConsent
+        pendingActionAfterConsent = null
+        if (action == "BACKUP") {
+            syncToGoogleDrive(getApplication())
+        } else if (action == "RESTORE") {
+            syncFromGoogleDrive(getApplication())
         }
     }
 
     // Google Drive Sync - Upload current ledger JSON
-    fun syncToGoogleDrive() {
-        val token = googleIdToken ?: run {
-            showStatus("ERR: GOOGLE CORE NOT CONNECTED")
+    fun syncToGoogleDrive(context: Context) {
+        val email = googleUserEmail.value
+        if (email.isEmpty()) {
+            logConsole("ERR: GOOGLE ACCOUNT NOT CONNECTED")
             return
         }
         
         viewModelScope.launch {
             cloudSyncStatus.value = "SYNCING"
+            logConsole("Starting Drive backup...")
+            
+            val token = fetchAccessToken(context, email)
+            if (token == null) {
+                pendingActionAfterConsent = "BACKUP"
+                logConsole("AWAITING CONSENT / RESOLVING AUTH...")
+                return@launch
+            }
+            
             try {
-                val drive = getDriveService(token)
+                logConsole("Auth token acquired.")
+                val payload = buildSyncPayload()
                 
-                // Prepare JSON
-                val coresJson = JSONArray()
-                allCores.value.forEach {
-                    val obj = JSONObject().apply {
-                        put("systemKey", it.systemKey)
-                        put("name", it.name)
-                        put("iconName", it.iconName)
-                        put("isSystemProtected", it.isSystemProtected)
-                    }
-                    coresJson.put(obj)
-                }
-
-                val txJson = JSONArray()
-                allTransactions.value.forEach {
-                    val obj = JSONObject().apply {
-                        put("amount", it.amount)
-                        put("currency", it.currency)
-                        put("memo", it.memo)
-                        put("categoryKey", it.categoryKey)
-                        put("timestamp", it.timestamp)
-                    }
-                    txJson.put(obj)
-                }
-
-                val backup = JSONObject().apply {
-                    put("cores", coresJson)
-                    put("transactions", txJson)
-                    put("system", "LEDGER.SYS")
-                    put("version", 1)
-                }
-
-                val content = backup.toString()
-                
-                // Search for existing file
-                val query = "name = 'LEDGER_BACKUP.JSON' and trashed = false"
-                val files = drive.files().list().setQ(query).execute().files
-                
-                val metadata = File().apply {
-                    name = "LEDGER_BACKUP.JSON"
-                    mimeType = "application/json"
-                }
-                
-                val mediaContent = com.google.api.client.http.ByteArrayContent.fromString("application/json", content)
-
-                if (files.isNullOrEmpty()) {
-                    // Create new
-                    drive.files().create(metadata, mediaContent).execute()
-                    showStatus("GOOGLE DRIVE: NEW BACKUP INITIALIZED")
+                logConsole("Searching for existing backup file...")
+                val fileId = searchBackupFile(token)
+                if (fileId != null) {
+                    logConsole("Existing backup found. Updating...")
                 } else {
-                    // Update existing
-                    val fileId = files[0].id
-                    drive.files().update(fileId, null, mediaContent).execute()
-                    showStatus("GOOGLE DRIVE: BACKUP REGISTER UPDATED")
+                    logConsole("No existing backup found. Creating new...")
                 }
-
+                
+                uploadBackupFile(token, fileId, payload)
+                
+                logConsole("Drive backup completed successfully!")
                 cloudSyncStatus.value = "SUCCESS"
             } catch (e: Exception) {
-                Log.e("LedgerViewModel", "Drive sync failed", e)
+                Log.e("LedgerViewModel", "Backup failed", e)
+                val errMsg = e.message ?: e.localizedMessage ?: e.toString()
+                logConsole("BACKUP FAILED: $errMsg")
                 cloudSyncStatus.value = "FAILED"
-                showStatus("GOOGLE DRIVE ERR: ${e.localizedMessage}")
             }
         }
     }
 
     // Google Drive Sync - Download/Restore current ledger JSON
-    fun syncFromGoogleDrive() {
-        val token = googleIdToken ?: run {
-            showStatus("ERR: GOOGLE CORE NOT CONNECTED")
+    fun syncFromGoogleDrive(context: Context) {
+        val email = googleUserEmail.value
+        if (email.isEmpty()) {
+            logConsole("ERR: GOOGLE ACCOUNT NOT CONNECTED")
             return
         }
         
         viewModelScope.launch {
             cloudSyncStatus.value = "SYNCING"
+            logConsole("Starting Drive restore...")
+            
+            val token = fetchAccessToken(context, email)
+            if (token == null) {
+                pendingActionAfterConsent = "RESTORE"
+                logConsole("AWAITING CONSENT / RESOLVING AUTH...")
+                return@launch
+            }
+            
             try {
-                val drive = getDriveService(token)
-                val query = "name = 'LEDGER_BACKUP.JSON' and trashed = false"
-                val files = drive.files().list().setQ(query).execute().files
-
-                if (files.isNullOrEmpty()) {
+                logConsole("Auth token acquired.")
+                logConsole("Searching for backup file...")
+                val fileId = searchBackupFile(token)
+                if (fileId == null) {
+                    logConsole("RESTORE ERROR: No backup file found in AppDataFolder.")
                     cloudSyncStatus.value = "FAILED"
-                    showStatus("GOOGLE DRIVE: NO BACKUP DATA DETECTED")
                     return@launch
                 }
-
-                val fileId = files[0].id
-                val inputStream = drive.files().get(fileId).executeMediaAsInputStream()
-                val jsonStr = inputStream.bufferedReader().use { it.readText() }
-
+                
+                logConsole("Backup file found. Downloading...")
+                val jsonStr = downloadBackupFile(token, fileId)
+                
+                logConsole("Data downloaded. Parsing...")
                 val backup = JSONObject(jsonStr)
                 if (!backup.has("system") || backup.getString("system") != "LEDGER.SYS") {
+                    logConsole("RESTORE ERROR: Invalid backup header format.")
                     cloudSyncStatus.value = "FAILED"
-                    showStatus("GOOGLE DRIVE: BACKUP FILE CORRUPT")
                     return@launch
                 }
-
-                // Import logic (same as local import)
+                
+                currentSyncPayload.value = backup.toString(2)
+                
+                // Import cores
+                logConsole("Importing systems & category cores...")
                 if (backup.has("cores")) {
                     val coresArray = backup.getJSONArray("cores")
                     for (i in 0 until coresArray.length()) {
@@ -715,6 +887,8 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
 
+                // Import transactions
+                logConsole("Importing transaction logs...")
                 if (backup.has("transactions")) {
                     val txArray = backup.getJSONArray("transactions")
                     for (i in 0 until txArray.length()) {
@@ -731,12 +905,13 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
 
+                logConsole("Restore completed successfully! System synchronized.")
                 cloudSyncStatus.value = "SUCCESS"
-                showStatus("GOOGLE DRIVE: SYSTEM STATE RESTORED")
             } catch (e: Exception) {
-                Log.e("LedgerViewModel", "Drive restore failed", e)
+                Log.e("LedgerViewModel", "Restore failed", e)
+                val errMsg = e.message ?: e.localizedMessage ?: e.toString()
+                logConsole("RESTORE FAILED: $errMsg")
                 cloudSyncStatus.value = "FAILED"
-                showStatus("GOOGLE DRIVE ERR: ${e.localizedMessage}")
             }
         }
     }
