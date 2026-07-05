@@ -1,0 +1,6 @@
+{
+  "name": "LEDGER.SYS",
+  "description": "A retro-brutalistic, monochrome 1-bit inspired terminal style ledger tracking app.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
